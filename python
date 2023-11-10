@@ -1,0 +1,33 @@
+from pyspark import SparkConf, SparkContext
+
+def main():
+    # Spark setup
+    conf = SparkConf().setAppName("WordCount")
+    sc = SparkContext(conf=conf)
+
+    # Example input data
+    input_text = [
+        "Hello world",
+        "Hello Spark",
+        "Apache Spark example",
+        "WordCount program"
+    ]
+
+    # Parallelize the input data
+    text_rdd = sc.parallelize(input_text)
+
+    # Perform WordCount
+    word_counts = text_rdd \
+        .flatMap(lambda line: line.split(" ")) \
+        .map(lambda word: (word, 1)) \
+        .reduceByKey(lambda x, y: x + y)
+
+    # Print the word counts
+    for word, count in word_counts.collect():
+        print(f"{word}: {count}")
+
+    # Stop the SparkContext
+    sc.stop()
+
+if __name__ == "__main__":
+    main()
