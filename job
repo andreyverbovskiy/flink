@@ -1,0 +1,114 @@
+// PageRank.java
+
+import org.apache.flink.api.common.functions.GroupReduceFunction;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.api.common.functions.FlatJoinFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.util.Collector;
+import org.apache.flink.api.java.functions.FunctionAnnotation;
+import org.apache.flink.api.java.operators.IterativeDataSet;
+import org.apache.flink.api.java.operators.DataSink;
+import org.apache.flink.api.java.tuple.Tuple;
+import org.apache.flink.api.java.tuple.Tuple1;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.tuple.Tuple5;
+import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.operators.DataSource;
+
+public class PageRank {
+    public static void main(String[] args) throws Exception {
+        // Set up the execution environment
+        ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+
+        // Read input graph (edge list)
+        String inputPath = "hdfs://path/to/graph.txt";
+        DataSource<Tuple2<String, String>> links = env.readTextFile(inputPath)
+            .map(new Tokenizer());
+
+        // Initialize page ranks
+        IterativeDataSet<Tuple2<String, Double>> initialRanks = links
+            .map(new InitRanks())
+            .name("InitialRankValues");
+
+        // Perform 10 iterations of PageRank
+        IterativeDataSet<Tuple2<String, Double>> iteration = initialRanks;
+        for (int i = 0; i < 10; i++) {
+            DataSet<Tuple2<String, Double>> contributions = links
+                .join(iteration, JoinHint.REPARTITION_HASH_SECOND)
+                .where(0)
+                .equalTo(0)
+                .flatMap(new DistributeRank())
+                .name("DistributeRank")
+                .groupBy(0)
+                .reduce(new SumRanks())
+                .name("SumRanks");
+
+            iteration = iteration
+                .join(contributions, JoinHint.REPARTITION_HASH_SECOND)
+                .where(0)
+                .equalTo(0)
+                .map(new UpdateRank())
+                .name("UpdateRank");
+        }
+
+        // Output result
+        String outputPath = "hdfs://path/to/pagerank-output";
+        iteration.writeAsText(outputPath);
+
+        // Execute Flink job
+        env.execute("PageRank");
+    }
+
+    // Tokenizer function for reading the edge list
+    @FunctionAnnotation.ForwardedFields("0; 1")
+    public static final class Tokenizer implements MapFunction<String, Tuple2<String, String>> {
+        public Tuple2<String, String> map(String value) {
+            String[] parts = value.split("\\s+");
+            return new Tuple2<>(parts[0], parts[1]);
+        }
+    }
+
+    // Initialize page ranks
+    @FunctionAnnotation.ForwardedFields("0")
+    public static final class InitRanks implements MapFunction<Tuple2<String, String>, Tuple2<String, Double>> {
+        public Tuple2<String, Double> map(Tuple2<String, String> value) {
+            return new Tuple2<>(value.f0, 1.0);
+        }
+    }
+
+    // Distribute rank to neighbors
+    @FunctionAnnotation.ForwardedFieldsFirst("0")
+    @FunctionAnnotation.ForwardedFieldsSecond("0")
+    public static final class DistributeRank implements FlatJoinFunction<Tuple2<String, String>, Tuple2<String, Double>, Tuple2<String, Double>> {
+        public void join(Tuple2<String, String> link, Tuple2<String, Double> rank, Collector<Tuple2<String, Double>> out) {
+            out.collect(new Tuple2<>(link.f1, rank.f1 / link.f1.split(",").length));
+        }
+    }
+
+    // Sum up ranks
+    @FunctionAnnotation.ForwardedFields("0")
+    @FunctionAnnotation.ReadFields("1")
+    public static final class SumRanks implements GroupReduceFunction<Tuple2<String, Double>, Tuple2<String, Double>> {
+        public void reduce(Iterable<Tuple2<String, Double>> values, Collector<Tuple2<String, Double>> out) {
+            double sum = 0.0;
+            String id = "";
+
+            for (Tuple2<String, Double> value : values) {
+                id = value.f0;
+                sum += value.f1;
+            }
+
+            out.collect(new Tuple2<>(id, sum));
+        }
+    }
+
+    // Update ranks
+    @FunctionAnnotation.ForwardedFields("0")
+    @FunctionAnnotation.ReadFields("1")
+    public static final class UpdateRank implements MapFunction<Tuple2<String, Double>, Tuple2<String, Double>> {
+        public Tuple2<String, Double> map(Tuple2<String, Double> value) {
+            return new Tuple2<>(value.f0, 0.15 + 0.85 * value.f1);
+        }
+    }
+}
